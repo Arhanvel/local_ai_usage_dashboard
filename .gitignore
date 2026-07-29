@@ -1,0 +1,18 @@
+# Generated database - holds local usage history (project paths, prompt text,
+# file names). Rebuildable any time with `python ingest.py --full`.
+data/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

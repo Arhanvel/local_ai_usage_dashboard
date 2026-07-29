@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Usage — local telemetry</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="rail">
+      <div class="mark">
+        <span class="mark-dot" aria-hidden="true"></span>
+        <span class="mark-text">AI&nbsp;USAGE</span>
+      </div>
+      <nav id="tabs" aria-label="Sections"></nav>
+      <div class="rail-foot">
+        <span class="k">local only</span>
+        <span class="v" id="rail-span">—</span>
+      </div>
+    </aside>
+
+    <div class="content">
+      <header class="bar">
+        <div class="bar-title">
+          <h1 id="page-title">Overview</h1>
+          <p id="page-sub">—</p>
+        </div>
+        <div class="controls">
+          <label class="field">
+            <span>Range</span>
+            <select id="range">
+              <option value="all">All time</option>
+              <option value="7">Last 7 days</option>
+              <option value="30">Last 30 days</option>
+              <option value="90">Last 90 days</option>
+              <option value="custom">Custom…</option>
+            </select>
+          </label>
+          <label class="field" id="f-since" hidden><span>From</span><input type="date" id="since"></label>
+          <label class="field" id="f-until" hidden><span>To</span><input type="date" id="until"></label>
+          <label class="field">
+            <span>Project</span>
+            <select id="project"><option value="">All</option></select>
+          </label>
+          <button id="refresh" class="primary">Refresh</button>
+        </div>
+      </header>
+
+      <main>
+        <div id="loading"><span class="pulse"></span> reading local transcripts…</div>
+        <div id="app" hidden>
+          <section class="tab" data-tab="overview"></section>
+          <section class="tab" data-tab="activity"></section>
+          <section class="tab" data-tab="cost"></section>
+          <section class="tab" data-tab="projects"></section>
+          <section class="tab" data-tab="tools"></section>
+          <section class="tab" data-tab="code"></section>
+          <section class="tab" data-tab="sessions"></section>
+          <section class="tab" data-tab="cursor"></section>
+          <section class="tab" data-tab="data"></section>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <div class="tip" id="tip" role="status"></div>
+  <script src="app.js"></script>
+</body>
+</html>
