@@ -47,51 +47,6 @@ estimated for Cursor.
 
 ---
 
-## Accuracy notes
-
-These are the places where the numbers need a caveat. They're surfaced in the UI too.
-
-- **One API response spans many transcript lines, each repeating the same usage.**
-  Claude Code writes one line per content block (thinking, text, and each `tool_use`),
-  all sharing a `message_id`, and stamps the *same* `usage` object on every one. In
-  this dataset that's 43,923 lines for 18,921 actual API calls — one response was
-  split across 22 lines. Tokens are counted **once per `message_id`**; summing the raw
-  lines inflates every total by ~2.3× on average.
-
-  Claude Code's own `stats-cache.json` appears to sum the raw lines (a naive re-parse
-  reproduces its numbers *exactly* on days with intact transcripts), so those rollups
-  are inflated the same way and are **not** comparable to the deduplicated totals.
-- **"Model replies" is not "your messages".** A billed API call happens on every step
-  of an agent loop, so the model replies far more often than you type — 18,995 replies
-  against 594 typed prompts here. Anything counting model activity is labelled
-  *model replies* / *API calls*; only *prompts you typed* is you.
-
-  A transcript's `user` turns are also not all yours: they carry SDK-injected prompts,
-  task notifications, and the instructions handed to sub-agents. Only
-  `promptSource` of `typed`, `queued` or `suggestion_accepted` is counted as human —
-  1,631 of the 2,225 user records are automated.
-- **Cost is derived, not recorded.** Token counts are real (straight from the API's
-  `usage` block); the dollar figure is those tokens × `aidash/pricing.json`. Only
-  entries marked `"confidence": "official"` are verified list prices — the rest are
-  assumptions you should correct. Edit the file and re-run
-  `python ingest.py --full` to recompute.
-- **Tool "latency"** is the transcript gap between a tool request and its result. If
-  the call waited on a permission prompt, that gap includes *your* idle time — one
-  Bash call here measures 11 hours. The table shows a median alongside the mean.
-- **Reasoning text isn't persisted.** Thinking blocks are counted, but the text is
-  stored empty (signature only), so there is no thinking-character metric.
-- **Cursor timestamps:** only ~2% of messages carry real timing data. The rest are
-  dated from their chat's creation day, so a chat spanning a week lands entirely on
-  its start date. The hour-of-day chart uses exact timestamps only.
-- **Cursor's AI-line tracker is a rolling buffer** capped at 10,000 lines — a recent
-  sample, not a lifetime total.
-- **Pruned history** from `stats-cache.json` is shown in its own table on the
-  Cost tab and is deliberately excluded from headline totals, since those days have
-  no per-message rows and would otherwise double-count.
-- Dates and hours are bucketed in **local** time.
-
----
-
 ## Incremental ingest
 
 Re-running `python ingest.py` is cheap — a no-op run takes well under a second.
