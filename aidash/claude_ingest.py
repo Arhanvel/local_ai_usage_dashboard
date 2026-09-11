@@ -4,44 +4,20 @@ Transcripts are append-only, so we remember the byte offset reached on the
 previous run and only decode bytes added since. A file that shrank or whose
 size no longer matches the recorded state is re-read from the start.
 """
+import hashlib
 import json
-import os
 from datetime import datetime, timezone
 
-from . import config
+from . import config, patterns
 from .config import friendly_project, local_parts, parse_ts
+from .patterns import ext_of as _ext_of
+from .pricing import Pricer
 
 SOURCE = "claude"
+PROMPT_TEXT_CHARS = 6000
 
 # Tool-result payload keys that hold the human-visible text, longest first.
 _RESULT_TEXT_KEYS = ("stdout", "content", "result", "text")
-
-
-class Pricer:
-    def __init__(self, pricing: dict):
-        self.models = pricing.get("models", {})
-        self.default = pricing.get("default", {"input": 0.0, "output": 0.0, "confidence": "fallback"})
-        cache = pricing.get("cache", {})
-        self.w5 = cache.get("write_5m_multiplier", 1.25)
-        self.w1h = cache.get("write_1h_multiplier", 2.0)
-        self.read_mult = cache.get("read_multiplier", 0.1)
-        self.seen = {}
-
-    def cost(self, model, inp, out, eph5, eph1h, cache_write, cache_read):
-        entry = self.models.get(model) or self.default
-        self.seen[model] = entry.get("confidence", "fallback")
-        pin = entry.get("input", 0.0) / 1_000_000.0
-        pout = entry.get("output", 0.0) / 1_000_000.0
-        # If the split isn't reported, treat all cache writes as 5m.
-        if not eph5 and not eph1h and cache_write:
-            eph5 = cache_write
-        return (
-            inp * pin
-            + out * pout
-            + eph5 * pin * self.w5
-            + eph1h * pin * self.w1h
-            + cache_read * pin * self.read_mult
-        )
 
 
 def _iter_new_lines(path, start_offset):
@@ -66,15 +42,6 @@ def _iter_new_lines(path, start_offset):
         except (ValueError, UnicodeDecodeError):
             continue
         yield obj, start_offset + consumed
-
-
-def _ext_of(path):
-    if not path:
-        return None
-    base = path.replace("\\", "/").rsplit("/", 1)[-1]
-    if "." not in base:
-        return None
-    return "." + base.rsplit(".", 1)[-1].lower()
 
 
 def _patch_line_counts(structured_patch):
@@ -156,6 +123,8 @@ class ClaudeIngester:
         self.rows = 0
         self.sessions = {}
         self.titles = {}
+        # {(key, session_id, evidence): count} - flushed with the sessions
+        self.tickets = {}
         self.transcript = "main"
         self.workflow_id = None
 
@@ -168,6 +137,7 @@ class ClaudeIngester:
         s = self.sessions.setdefault(sid, {
             "session_id": sid, "project": project, "project_dir": project_dir,
             "cwd": rec.get("cwd"), "slug": None, "ai_title": None,
+            "custom_title": None, "agent_name": None,
             "git_branch": None, "version": None, "entrypoint": None,
             "first_ts": None, "last_ts": None,
         })
@@ -189,9 +159,19 @@ class ClaudeIngester:
         rtype = rec.get("type")
         sid = self._touch_session(rec, project, project_dir)
 
-        if rtype == "ai-title":
-            if sid:
+        if rtype in ("ai-title", "custom-title", "agent-name"):
+            if not sid:
+                return
+            s = self.sessions[sid]
+            if rtype == "ai-title":
                 self.titles[sid] = rec.get("aiTitle")
+            elif rtype == "custom-title":
+                s["custom_title"] = rec.get("customTitle") or s["custom_title"]
+            else:
+                s["agent_name"] = rec.get("agentName") or s["agent_name"]
+            title = rec.get("aiTitle") or rec.get("customTitle")
+            if title:
+                self._ticket(sid, project, rec.get("timestamp"), "title", title)
             return
         if rtype == "assistant":
             self._assistant(rec, sid, project)
@@ -233,6 +213,11 @@ class ClaudeIngester:
             )
             self.rows += 1
             return
+        if sub == "compact_boundary":
+            # The one canonical "context was compacted" event. The user-side
+            # continuation summary that follows it is not recorded again.
+            self._event(rec, sid, project, "compact", "boundary", None)
+            return
         detail = rec.get("content") if isinstance(rec.get("content"), str) else None
         self._event(rec, sid, project, "system", sub, detail)
 
@@ -255,8 +240,12 @@ class ClaudeIngester:
         cost = self.pricer.cost(model, inp, out, eph5, eph1h, cw, cr)
 
         think_blocks = think_chars = text_chars = tool_uses = 0
+        first_text = None
         content = msg.get("content")
         blocks = content if isinstance(content, list) else []
+        if isinstance(content, str):
+            first_text = content
+            text_chars = len(content)
         for blk in blocks:
             if not isinstance(blk, dict):
                 continue
@@ -265,25 +254,30 @@ class ClaudeIngester:
                 think_blocks += 1
                 think_chars += len(blk.get("thinking") or "")
             elif bt == "text":
-                text_chars += len(blk.get("text") or "")
+                txt = blk.get("text") or ""
+                text_chars += len(txt)
+                if first_text is None and txt:
+                    first_text = txt
             elif bt == "tool_use":
                 tool_uses += 1
+        error_kind = "api_error" if rec.get("isApiErrorMessage") \
+            else patterns.classify_error(first_text, tool_uses)
 
         uuid = rec.get("uuid")
         self.con.execute(
             "INSERT OR REPLACE INTO cc_message (uuid,session_id,parent_uuid,ts,date,hour,dow,type,role,"
             "model,is_sidechain,effort,request_id,message_id,input_tokens,output_tokens,cache_write,cache_read,"
             "eph_5m,eph_1h,service_tier,speed,stop_reason,thinking_blocks,thinking_chars,text_chars,"
-            "tool_uses,web_search_reqs,web_fetch_reqs,is_api_error,api_error_status,cost_usd,skill,"
-            "agent_id,agent_type,transcript,workflow_id,"
-            "project,cwd,git_branch,version) VALUES (" + ",".join("?" * 41) + ")",
+            "tool_uses,web_search_reqs,web_fetch_reqs,is_api_error,api_error_status,error_kind,cost_usd,"
+            "skill,agent_id,agent_type,transcript,workflow_id,"
+            "project,cwd,git_branch,version) VALUES (" + ",".join("?" * 42) + ")",
             (uuid, sid, rec.get("parentUuid"), rec.get("timestamp"), date, hour, dow, "assistant",
              msg.get("role"), model, 1 if rec.get("isSidechain") else 0, rec.get("effort"),
              rec.get("requestId"), msg.get("id"), inp, out, cw, cr, eph5, eph1h,
              usage.get("service_tier"), usage.get("speed"), msg.get("stop_reason"),
              think_blocks, think_chars, text_chars, tool_uses,
              server.get("web_search_requests") or 0, server.get("web_fetch_requests") or 0,
-             1 if rec.get("isApiErrorMessage") else 0, rec.get("apiErrorStatus"), cost,
+             1 if rec.get("isApiErrorMessage") else 0, rec.get("apiErrorStatus"), error_kind, cost,
              rec.get("attributionSkill"), rec.get("agentId"), rec.get("attributionAgent"),
              self.transcript, self.workflow_id,
              project, rec.get("cwd"), rec.get("gitBranch"), rec.get("version")),
@@ -306,6 +300,14 @@ class ClaudeIngester:
 
         file_path = tool_input.get("file_path") or tool_input.get("path") or tool_input.get("notebook_path")
         command = tool_input.get("command")
+        ts = rec.get("timestamp")
+        if is_mcp and "atlassian" in name.lower():
+            self._ticket(sid, project, ts, "lookup", raw[:2000])
+        # Commit evidence comes only from git's own output (see _git_outcomes):
+        # a `git commit` command may be a dry run, rejected by a hook, or never
+        # have run at all.
+        if file_path:
+            self._ticket(sid, project, ts, "file", str(file_path).replace("\\", "/"))
         self.con.execute(
             "INSERT OR REPLACE INTO cc_tool_call (tool_use_id,message_uuid,session_id,project,ts,date,hour,"
             "name,is_mcp,mcp_server,input_chars,input_json,skill,transcript,agent_id,"
@@ -346,16 +348,52 @@ class ClaudeIngester:
             self._tool_result(rec, block, payload, sid, project, date)
 
     def _prompt(self, rec, sid, project, text, date, hour, dow):
+        # Interrupts arrive as user text; they are events about the session,
+        # not prompts. The compaction summary is already covered by the
+        # compact_boundary system record.
+        if text.startswith("[Request interrupted"):
+            self._event(rec, sid, project, "interrupt", "user", text)
+            return
+        if text.startswith("This session is being continued from a previous") or rec.get("isCompactSummary"):
+            return
+        clean, slash = patterns.clean_prompt(text)
         origin = rec.get("origin") or {}
+        origin_kind = origin.get("kind") if isinstance(origin, dict) else None
+        source = rec.get("promptSource")
+        # The opening turn of a sub-agent transcript is the Agent tool's
+        # instruction text, never something a person typed.
+        nested = self.transcript != "main" or bool(rec.get("isSidechain"))
+        human = bool(clean) and (not nested) and patterns.is_human_prompt(
+            source, origin_kind, clean, bool(rec.get("isMeta")), rec.get("entrypoint"))
+        if human:
+            self._ticket(sid, project, rec.get("timestamp"), "prompt", clean[:4000])
+        if not clean:
+            # Pure harness noise (a command-output echo, a bare reminder block)
+            # still gets a row so the automated-prompt counts stay honest.
+            source = source or "harness"
+        stored = clean if clean else text
         self.con.execute(
             "INSERT OR REPLACE INTO cc_prompt (uuid,session_id,project,ts,date,hour,dow,prompt_id,source,"
-            "origin_kind,chars,words,preview) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "origin_kind,chars,words,preview,text,is_slash,slash_name,intents,is_human,transcript)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (rec.get("uuid"), sid, project, rec.get("timestamp"), date, hour, dow,
-             rec.get("promptId"), rec.get("promptSource"),
-             origin.get("kind") if isinstance(origin, dict) else None,
-             len(text), len(text.split()), text[:300]),
+             rec.get("promptId"), source or ("subagent" if nested else None), origin_kind,
+             len(stored), len(stored.split()), stored[:300],
+             clean[:PROMPT_TEXT_CHARS] if clean else None,
+             1 if slash else 0, slash, patterns.classify_intents(clean) if human else "",
+             1 if human else 0, self.transcript),
         )
         self.rows += 1
+
+    def _ticket(self, sid, project, ts, evidence, text):
+        if not sid:
+            return
+        for key in patterns.find_tickets(text):
+            k = (key, sid, evidence)
+            if k not in self.tickets:
+                _iso, date, _h, _d = local_parts(parse_ts(ts))
+                self.tickets[k] = [project, date, 0]
+            self.tickets[k][2] += 1
 
     def _tool_result(self, rec, block, payload, sid, project, date):
         tuid = block.get("tool_use_id")
@@ -383,6 +421,7 @@ class ClaudeIngester:
             if isinstance(payload.get("stderr"), str) and payload["stderr"].strip() and not result_chars:
                 result_chars = len(payload["stderr"])
             self._maybe_subagent(rec, payload, tuid, sid, project, date)
+            self._git_outcomes(rec, payload, sid, project, date)
 
         result_ts = rec.get("timestamp")
         latency_ms = None
@@ -401,6 +440,31 @@ class ClaudeIngester:
         )
         self.rows += 1
 
+    def _git_outcomes(self, rec, payload, sid, project, date):
+        out = payload.get("stdout")
+        err = payload.get("stderr")
+        text = "\n".join(p for p in (out, err) if isinstance(p, str) and p)
+        if not text:
+            return
+        found = patterns.scan_git_output(text)
+        ts = rec.get("timestamp")
+        for c in found["commits"]:
+            self.con.execute(
+                "INSERT OR IGNORE INTO cc_git (kind,key,session_id,project,ts,date,branch,subject,"
+                "files,insertions,deletions) VALUES ('commit',?,?,?,?,?,?,?,?,?,?)",
+                (c["sha"], sid, project, ts, date, c["branch"], c["subject"],
+                 c["files"], c["insertions"], c["deletions"]))
+            self._ticket(sid, project, ts, "commit", c["subject"])
+        for remote in found["pushes"]:
+            self.con.execute(
+                "INSERT OR IGNORE INTO cc_git (kind,key,session_id,project,ts,date) VALUES ('push',?,?,?,?,?)",
+                (f"{sid}:{ts}:{remote}", sid, project, ts, date))
+        for url in found["prs"]:
+            self.con.execute(
+                "INSERT OR IGNORE INTO cc_git (kind,key,session_id,project,ts,date,subject)"
+                " VALUES ('pr',?,?,?,?,?,?)", (url, sid, project, ts, date, url))
+        self.rows += len(found["commits"]) + len(found["pushes"]) + len(found["prs"])
+
     def _maybe_subagent(self, rec, payload, tuid, sid, project, date):
         if "agentType" not in payload and "resolvedModel" not in payload:
             return
@@ -418,27 +482,44 @@ class ClaudeIngester:
     def flush_sessions(self):
         for sid, s in self.sessions.items():
             title = self.titles.get(sid)
+            if s["git_branch"]:
+                self._ticket(sid, s["project"], s["first_ts"], "branch", s["git_branch"])
             self.con.execute(
-                "INSERT INTO cc_session (session_id,project,project_dir,cwd,slug,ai_title,git_branch,"
-                "version,entrypoint,first_ts,last_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+                "INSERT INTO cc_session (session_id,project,project_dir,cwd,slug,ai_title,custom_title,"
+                "agent_name,git_branch,version,entrypoint,first_ts,last_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
                 " ON CONFLICT(session_id) DO UPDATE SET"
                 " project=excluded.project, project_dir=excluded.project_dir,"
                 " cwd=COALESCE(excluded.cwd, cc_session.cwd),"
                 " slug=COALESCE(excluded.slug, cc_session.slug),"
                 " ai_title=COALESCE(excluded.ai_title, cc_session.ai_title),"
+                " custom_title=COALESCE(excluded.custom_title, cc_session.custom_title),"
+                " agent_name=COALESCE(excluded.agent_name, cc_session.agent_name),"
                 " git_branch=COALESCE(excluded.git_branch, cc_session.git_branch),"
                 " version=COALESCE(excluded.version, cc_session.version),"
                 " entrypoint=COALESCE(excluded.entrypoint, cc_session.entrypoint),"
                 " first_ts=MIN(COALESCE(cc_session.first_ts, excluded.first_ts), excluded.first_ts),"
                 " last_ts=MAX(COALESCE(cc_session.last_ts, excluded.last_ts), excluded.last_ts)",
-                (sid, s["project"], s["project_dir"], s["cwd"], s["slug"], title, s["git_branch"],
-                 s["version"], s["entrypoint"], s["first_ts"], s["last_ts"]),
+                (sid, s["project"], s["project_dir"], s["cwd"], s["slug"], title, s["custom_title"],
+                 s["agent_name"], s["git_branch"], s["version"], s["entrypoint"],
+                 s["first_ts"], s["last_ts"]),
             )
+        for (key, sid, evidence), (project, date, n) in self.tickets.items():
+            # Branch evidence is a property of the session, re-derived on every
+            # incremental pass, so it must not accumulate like the per-record kinds.
+            self.con.execute(
+                "INSERT INTO cc_ticket (key,session_id,project,date,evidence,n) VALUES (?,?,?,?,?,?)"
+                " ON CONFLICT(key,session_id,evidence) DO UPDATE SET"
+                " n=CASE WHEN excluded.evidence='branch' THEN 1 ELSE cc_ticket.n+excluded.n END,"
+                " project=COALESCE(excluded.project, cc_ticket.project),"
+                " date=COALESCE(cc_ticket.date, excluded.date)",
+                (key, sid, project, date, evidence, n))
         self.sessions.clear()
         self.titles.clear()
+        self.tickets.clear()
 
 
-PROJECT_TABLES = ("cc_message", "cc_tool_call", "cc_prompt", "cc_turn", "cc_subagent", "cc_event")
+PROJECT_TABLES = ("cc_message", "cc_tool_call", "cc_prompt", "cc_turn", "cc_subagent", "cc_event",
+                  "cc_git", "cc_ticket")
 
 
 def normalize_projects(con):
@@ -573,6 +654,44 @@ def ingest_stats_cache(con):
     return n
 
 
+def ingest_history(con, full=False):
+    """Fold in ~/.claude/history.jsonl: one line per prompt typed at the REPL.
+
+    It survives transcript pruning, so it reaches further back than the
+    per-message tables. The file is small and may be trimmed from the front,
+    so it is re-read whole and rows are keyed by content rather than by line.
+    """
+    path = config.claude_home() / "history.jsonl"
+    if not path.exists():
+        return 0
+    if full:
+        con.execute("DELETE FROM cc_history")
+    added = 0
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            text = rec.get("display") or ""
+            dt = parse_ts(rec.get("timestamp"))
+            iso, date, _h, _d = local_parts(dt)
+            proj_path = rec.get("project")
+            key = hashlib.sha1(f"{rec.get('timestamp')}|{rec.get('sessionId')}|{text}".encode("utf-8")).hexdigest()
+            cur = con.execute(
+                "INSERT OR IGNORE INTO cc_history (key,ts,date,project_path,project,session_id,chars,"
+                "pasted,is_slash,preview) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (key, iso, date, proj_path, friendly_project(proj_path, None),
+                 rec.get("sessionId"), len(text),
+                 1 if rec.get("pastedContents") else 0,
+                 1 if text.startswith("/") else 0, text[:300]))
+            added += cur.rowcount or 0
+    con.commit()
+    return added
+
+
 def run(con, full=False, verbose=True):
     """Ingest all Claude Code transcripts. Returns a summary dict."""
     projects = config.claude_projects_dir()
@@ -580,7 +699,7 @@ def run(con, full=False, verbose=True):
     if not projects.is_dir():
         return {"ok": False, "error": f"No Claude projects dir at {projects}"}
 
-    pricer = Pricer(config.load_pricing())
+    pricer = Pricer()
     ing = ClaudeIngester(con, pricer, verbose)
 
     state = {(r["key"]): r for r in con.execute(
@@ -641,6 +760,7 @@ def run(con, full=False, verbose=True):
     relabelled = normalize_projects(con)
     deduped = dedupe_usage(con)
     legacy_days = ingest_stats_cache(con)
+    history_lines = ingest_history(con, full=full)
     con.execute(
         "INSERT INTO ingest_run (started_at,finished_at,source,files_seen,files_read,rows_added,note)"
         " VALUES (?,?,?,?,?,?,?)",
@@ -651,5 +771,6 @@ def run(con, full=False, verbose=True):
     return {
         "ok": True, "files_seen": files_seen, "files_read": files_read,
         "rows": ing.rows, "legacy_days": legacy_days, "relabelled": relabelled,
-        "usage_deduped": deduped, "pricing_confidence": pricer.seen,
+        "usage_deduped": deduped, "history_lines": history_lines,
+        "pricing_confidence": pricer.seen,
     }

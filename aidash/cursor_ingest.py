@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 
 from . import config
 from .config import local_parts, parse_ts
+from .patterns import ext_of as _ext_of
 
 SOURCE = "cursor"
 BUBBLE_ROLE = {1: "user", 2: "assistant"}
@@ -42,15 +43,6 @@ def _loads(value):
         return json.loads(value)
     except (ValueError, UnicodeDecodeError):
         return None
-
-
-def _ext_of(name):
-    if not name:
-        return None
-    base = str(name).replace("\\", "/").rsplit("/", 1)[-1]
-    if "." not in base:
-        return None
-    return "." + base.rsplit(".", 1)[-1].lower()
 
 
 def _project_from_repo(repo_path):

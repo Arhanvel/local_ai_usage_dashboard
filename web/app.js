@@ -2,17 +2,28 @@
 'use strict';
 
 const DOW = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+/* Behaviour tabs live in insights.js (loaded first) and slot in here. */
+const EXTRA = window.AIDASH_EXTRA || { tabs: [], renderers: {}, afterMount() {} };
+const extraTab = (id) => EXTRA.tabs.find(t => t[0] === id) || [id, id, ''];
 const TABS = [
   ['overview', 'Overview', 'Headline meters across both assistants'],
   ['activity', 'Activity', 'When the work happens'],
+  extraTab('habits'),
   ['cost', 'Cost & Models', 'Estimated spend, token mix, cache economics'],
   ['projects', 'Projects', 'Where the tokens went'],
   ['tools', 'Tools', 'Every tool call, error and denial'],
   ['code', 'Files & Code', 'Lines written and files touched'],
+  extraTab('delivery'),
   ['sessions', 'Sessions', 'Session shape and the heaviest runs'],
+  extraTab('friction'),
+  extraTab('skills'),
   ['cursor', 'Cursor', 'Local Cursor history — no usage metering'],
+  extraTab('lab'),
   ['data', 'Data & Sources', 'Provenance, ingest history, caveats'],
 ];
+/* A standalone export embeds its data and renders every tab on one page. */
+const REPORT = window.__AIDASH_REPORT__ || null;
+const REPORT_SKIP = new Set(['lab']);
 
 /* Series colours live in CSS so both themes stay in one place. */
 let PALETTE = [];
@@ -64,6 +75,13 @@ const pct = (n) => (Number(n) || 0).toFixed(1) + '%';
 const shortDate = (d) => (d || '').slice(5);
 /* Local YYYY-MM-DD. toISOString() would convert to UTC and shift the day. */
 const isoLocal = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+/* Timestamps are stored in UTC; every table shows them in the viewer's local time. */
+function when(v) {
+  if (!v) return '';
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return esc(String(v).slice(0, 16));
+  return esc(`${isoLocal(d)} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`);
+}
 
 /* --------------------------------------------------------------- tooltip */
 const tip = $('#tip');
@@ -134,7 +152,7 @@ function lineChart(host, { series, labels, height = 230, fmt = num, stacked = fa
 
   for (const t of ticks) {
     root.appendChild(svg('line', { x1: M.l, x2: W - M.r, y1: Y(t), y2: Y(t), stroke: 'var(--rule)', 'stroke-width': 1 }));
-    const lb = svg('text', { x: M.l - 7, y: Y(t) + 4, 'text-anchor': 'end', fill: 'var(--ink-3)', 'font-size': 10.5 });
+    const lb = svg('text', { x: M.l - 7, y: Y(t) + 4, 'text-anchor': 'end', fill: 'var(--ink-3)', 'font-size': 11 });
     lb.textContent = fmt(t);
     root.appendChild(lb);
   }
@@ -168,7 +186,7 @@ function lineChart(host, { series, labels, height = 230, fmt = num, stacked = fa
   // x labels: at most ~8
   const step = Math.max(1, Math.ceil(n / 8));
   for (let i = 0; i < n; i += step) {
-    const t = svg('text', { x: X(i), y: H - 8, 'text-anchor': 'middle', fill: 'var(--ink-3)', 'font-size': 10.5 });
+    const t = svg('text', { x: X(i), y: H - 8, 'text-anchor': 'middle', fill: 'var(--ink-3)', 'font-size': 11 });
     t.textContent = labels[i];
     root.appendChild(t);
   }
@@ -216,7 +234,7 @@ function barChart(host, { labels, values, height = 200, fmt = num, color = PALET
   for (const t of ticks) {
     const y = M.t + ih - (t / top) * ih;
     root.appendChild(svg('line', { x1: M.l, x2: W - M.r, y1: y, y2: y, stroke: 'var(--rule)' }));
-    const lb = svg('text', { x: M.l - 7, y: y + 4, 'text-anchor': 'end', fill: 'var(--ink-3)', 'font-size': 10.5 });
+    const lb = svg('text', { x: M.l - 7, y: y + 4, 'text-anchor': 'end', fill: 'var(--ink-3)', 'font-size': 11 });
     lb.textContent = fmt(t);
     root.appendChild(lb);
   }
@@ -233,7 +251,7 @@ function barChart(host, { labels, values, height = 200, fmt = num, color = PALET
     root.appendChild(r);
     const stepL = Math.max(1, Math.ceil(labels.length / 12));
     if (i % stepL === 0) {
-      const t = svg('text', { x: M.l + i * bw + bw / 2, y: H - 7, 'text-anchor': 'middle', fill: 'var(--ink-3)', 'font-size': 10.5 });
+      const t = svg('text', { x: M.l + i * bw + bw / 2, y: H - 7, 'text-anchor': 'middle', fill: 'var(--ink-3)', 'font-size': 11 });
       t.textContent = lab;
       root.appendChild(t);
     }
@@ -273,12 +291,12 @@ function punchcard(host, cells, { valueKey = 'api_calls' } = {}) {
   const root = svg('svg', { class: 'chart', width: W, height: H, viewBox: `0 0 ${W} ${H}` });
 
   for (let h = 0; h < 24; h += 3) {
-    const t = svg('text', { x: left + h * cell + cell / 2, y: 11, 'text-anchor': 'middle', fill: 'var(--ink-3)', 'font-size': 10 });
+    const t = svg('text', { x: left + h * cell + cell / 2, y: 11, 'text-anchor': 'middle', fill: 'var(--ink-3)', 'font-size': 11 });
     t.textContent = h;
     root.appendChild(t);
   }
   for (let d = 0; d < 7; d++) {
-    const t = svg('text', { x: left - 7, y: topPad + d * cell + cell / 2 + 4, 'text-anchor': 'end', fill: 'var(--ink-3)', 'font-size': 10.5 });
+    const t = svg('text', { x: left - 7, y: topPad + d * cell + cell / 2 + 4, 'text-anchor': 'end', fill: 'var(--ink-3)', 'font-size': 11 });
     t.textContent = DOW[d];
     root.appendChild(t);
     for (let h = 0; h < 24; h++) {
@@ -320,7 +338,7 @@ function calendar(host, daily, { key = 'total_tokens', fmt = num } = {}) {
   const root = svg('svg', { class: 'chart', width: W, height: H, viewBox: `0 0 ${W} ${H}` });
 
   for (let d = 0; d < 7; d += 2) {
-    const t = svg('text', { x: left - 5, y: topPad + d * (cell + gap) + cell - 2, 'text-anchor': 'end', fill: 'var(--ink-3)', 'font-size': 9.5 });
+    const t = svg('text', { x: left - 5, y: topPad + d * (cell + gap) + cell - 2, 'text-anchor': 'end', fill: 'var(--ink-3)', 'font-size': 11 });
     t.textContent = DOW[d];
     root.appendChild(t);
   }
@@ -334,7 +352,7 @@ function calendar(host, daily, { key = 'total_tokens', fmt = num } = {}) {
     const x = left + w * (cell + gap), y = topPad + dow * (cell + gap);
     if (dt.getMonth() !== lastMonth && dow <= 1) {
       lastMonth = dt.getMonth();
-      const t = svg('text', { x, y: 9, fill: 'var(--ink-3)', 'font-size': 9.5 });
+      const t = svg('text', { x, y: 9, fill: 'var(--ink-3)', 'font-size': 11 });
       t.textContent = dt.toLocaleString(undefined, { month: 'short' });
       root.appendChild(t);
     }
@@ -390,7 +408,7 @@ function donut(host, slices, { fmt = num, centreLabel = '' } = {}) {
   t1.textContent = fmt(total);
   root.appendChild(t1);
   if (centreLabel) {
-    const t2 = svg('text', { x: cx, y: cy + 14, 'text-anchor': 'middle', fill: 'var(--ink-3)', 'font-size': 10.5 });
+    const t2 = svg('text', { x: cx, y: cy + 14, 'text-anchor': 'middle', fill: 'var(--ink-3)', 'font-size': 11 });
     t2.textContent = centreLabel;
     root.appendChild(t2);
   }
@@ -876,7 +894,7 @@ function renderSessions() {
     { k: 'tool_uses', label: 'Tools', num: true, fmt: int },
     { k: 'sidechain_messages', label: 'Sub-agent', num: true, fmt: int },
     { k: 'git_branch', label: 'Branch', cls: 'mono' },
-    { k: 'started', label: 'Started', fmt: (v) => esc((v || '').slice(0, 16).replace('T', ' ')) },
+    { k: 'started', label: 'Started', fmt: when },
   ]), 'full');
 
   html += `<div class="grid cols-2">
@@ -1038,9 +1056,18 @@ const RENDERERS = {
   overview: renderOverview, activity: renderActivity, cost: renderCost,
   projects: renderProjects, tools: renderTools, code: renderCode,
   sessions: renderSessions, cursor: renderCursor, data: renderData,
+  ...EXTRA.renderers,
 };
 
 /* ---------------------------------------------------------------- shell */
+function mountTab(name, host) {
+  pending.length = 0;
+  host.innerHTML = RENDERERS[name]();
+  flushCharts(host);
+  wireTables(host);
+  EXTRA.afterMount(name, host);
+}
+
 function showTab(name) {
   if (!RENDERERS[name]) name = 'overview';
   activeTab = name;
@@ -1055,22 +1082,129 @@ function showTab(name) {
     b.classList.toggle('active', b.dataset.tab === name));
   document.querySelectorAll('section.tab').forEach(s =>
     s.classList.toggle('active', s.dataset.tab === name));
-  const host = $(`section[data-tab="${name}"]`);
-  pending.length = 0;
-  host.innerHTML = RENDERERS[name]();
-  flushCharts(host);
-  wireTables(host);
+  mountTab(name, $(`section[data-tab="${name}"]`));
   scrollTo({ top: 0 });
+}
+
+/* Report mode: every tab, stacked, with its own heading. */
+function renderReport() {
+  const app = $('#app');
+  app.innerHTML = '';
+  for (const [k, label, sub] of TABS) {
+    if (REPORT_SKIP.has(k) || !RENDERERS[k]) continue;
+    const sec = document.createElement('section');
+    sec.className = 'tab active report-section';
+    sec.dataset.tab = k;
+    sec.innerHTML = `<h2 class="report-h">${esc(label)} <span>${esc(sub)}</span></h2><div class="report-body"></div>`;
+    app.appendChild(sec);
+    try {
+      mountTab(k, sec.querySelector('.report-body'));
+    } catch (e) {
+      sec.querySelector('.report-body').innerHTML = `<div class="empty">section error: ${esc(e.message)}</div>`;
+    }
+  }
 }
 
 function buildTabs() {
   $('#tabs').innerHTML = TABS.map(([k, label]) =>
     `<button data-tab="${k}" type="button">${esc(label)}</button>`).join('');
+  $('#app').innerHTML = TABS.map(([k]) => `<section class="tab" data-tab="${k}"></section>`).join('');
   $('#tabs').addEventListener('click', (e) => {
     const b = e.target.closest('button');
     if (b) showTab(b.dataset.tab);
   });
 }
+
+/* ---------------------------------------------------------- lazy data */
+/* The behaviour analyses and skill mining are fetched when a tab first needs
+   them, keyed by the current filters so a filter change mid-flight cannot
+   land stale data. A standalone report has them inline already. */
+const lazyState = {};
+function lazy(key, url) {
+  if (REPORT) return DATA[key] || { error: 'not included in this export' };
+  const filters = currentFilters().toString();
+  const have = DATA[key];
+  if (have && have._filters === filters) return have;
+  const st = lazyState[key];
+  if (st && st.filters === filters) return null; // already in flight
+  lazyState[key] = { filters };
+  fetch(url + '?' + filters).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+    .then(data => { data._filters = filters; return data; })
+    .catch(e => ({ error: e.message, _filters: filters }))
+    .then(data => {
+      if (lazyState[key] && lazyState[key].filters === filters && currentFilters().toString() === filters) {
+        DATA[key] = data;
+        delete lazyState[key];
+        if (DATA) showTab(activeTab);
+      }
+    });
+  return null;
+}
+const spinner = (what) => `<div id="loading"><span class="pulse"></span> ${esc(what)}…</div>`;
+
+/* ----------------------------------------------------------------- jobs */
+/* Long work runs server-side; the status strip under the header follows it. */
+const jobbar = $('#jobbar');
+function setJobbar(html, cls = '') {
+  if (!jobbar) return;
+  jobbar.className = 'jobbar ' + cls;
+  jobbar.hidden = !html;
+  jobbar.innerHTML = html;
+}
+
+async function pollJob(id) {
+  for (;;) {
+    const j = await fetch('/api/jobs/' + id).then(r => r.json());
+    if (DATA) {
+      // DATA.jobs mirrors the server's list; this is just a fresher copy of one entry.
+      DATA.jobs = DATA.jobs || [];
+      const idx = DATA.jobs.findIndex(x => x.id === j.id);
+      if (idx >= 0) DATA.jobs[idx] = j; else DATA.jobs.unshift(j);
+      const list = $('#jobs-list');
+      if (list) list.innerHTML = EXTRA.jobsHtml ? EXTRA.jobsHtml() : '';
+    }
+    if (j.status !== 'running') return j;
+    const last = j.log[j.log.length - 1] || '';
+    setJobbar(`<span class="pulse"></span> <b>${esc(j.label)}</b> <span class="mono">${esc(last.slice(10))}</span>
+      <button class="link" data-cancel="${esc(j.id)}">cancel</button>`, 'running');
+    await new Promise(r => setTimeout(r, 900));
+  }
+}
+
+async function runJob(kind, body = {}, onDone = null) {
+  let j;
+  try {
+    const res = await fetch('/api/jobs/' + kind, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body) });
+    j = await res.json();
+    if (!res.ok) { setJobbar(`<b>${esc(j.error || 'could not start job')}</b>`, 'failed'); return null; }
+    j = await pollJob(j.id);
+  } catch (e) {
+    setJobbar(`<b>Job failed:</b> ${esc(e.message)}`, 'failed');
+    return null;
+  }
+  if (j.status === 'failed') {
+    setJobbar(`<b>${esc(j.label)} failed:</b> ${esc(j.error || '')} <button class="link" data-dismiss>dismiss</button>`, 'failed');
+  } else {
+    const out = j.result && j.result.url;
+    setJobbar(`<b>${esc(j.label)} ${esc(j.status)}.</b> ${out ? `<a href="${esc(out)}" target="_blank" rel="noopener">${esc(j.result.file)}</a>` : ''}
+      <button class="link" data-dismiss>dismiss</button>`, 'done');
+  }
+  if (kind === 'refresh' || kind === 'refresh-full') {
+    try {
+      await load();
+    } catch (e) {
+      setJobbar(`<b>Reload after ${esc(j.label.toLowerCase())} failed:</b> ${esc(e.message)} <button class="link" data-dismiss>dismiss</button>`, 'failed');
+    }
+  }
+  if (onDone) onDone(j);
+  return j;
+}
+if (jobbar) jobbar.addEventListener('click', (e) => {
+  const c = e.target.closest('[data-cancel]');
+  if (c) fetch('/api/jobs/' + c.dataset.cancel + '/cancel', { method: 'POST' });
+  if (e.target.closest('[data-dismiss]')) setJobbar('');
+});
 
 function currentFilters() {
   const q = new URLSearchParams();
@@ -1087,11 +1221,23 @@ function currentFilters() {
   return q;
 }
 
+let resizeWired = false;
 async function load() {
   $('#loading').hidden = false;
   $('#app').hidden = true;
-  const res = await fetch('/api/data?' + currentFilters().toString());
-  DATA = await res.json();
+  const keep = DATA ? { artifacts: DATA.artifacts, jobs: DATA.jobs } : {};
+  try {
+    const res = await fetch('/api/data?' + currentFilters().toString());
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    DATA = Object.assign(await res.json(), keep);
+  } finally {
+    // Never leave the page blank: an old payload beats no payload.
+    if (DATA) { $('#loading').hidden = true; $('#app').hidden = false; }
+  }
+  if (!resizeWired) {
+    resizeWired = true;
+    addEventListener('resize', () => { clearTimeout(window._rz); window._rz = setTimeout(() => showTab(activeTab), 220); });
+  }
 
   const sel = $('#project');
   if (sel.options.length <= 1) {
@@ -1104,12 +1250,18 @@ async function load() {
   const ov = DATA.claude.overview;
   $('#rail-span').textContent = ov.first_day ? `${ov.first_day} → ${ov.last_day}` : 'no data';
 
-  $('#loading').hidden = true;
-  $('#app').hidden = false;
   showTab(activeTab);
 }
 
 function init() {
+  if (REPORT) {
+    // Standalone export: no controls, no fetches, data is inline.
+    DATA = window.__AIDASH_DATA__;
+    readPalette();
+    renderReport();
+    addEventListener('resize', () => { clearTimeout(window._rz); window._rz = setTimeout(renderReport, 250); });
+    return;
+  }
   buildTabs();
   $('#range').addEventListener('change', () => {
     const custom = $('#range').value === 'custom';
@@ -1122,18 +1274,9 @@ function init() {
   $('#project').addEventListener('change', load);
   $('#refresh').addEventListener('click', async () => {
     const b = $('#refresh');
-    b.disabled = true; b.textContent = 'Refreshing…';
-    try {
-      await fetch('/api/refresh', { method: 'POST' });
-      await load();
-    } catch (e) {
-      alert('Refresh failed: ' + e.message);
-    } finally {
-      b.disabled = false; b.textContent = 'Refresh data';
-    }
+    b.disabled = true;
+    try { await runJob('refresh'); } finally { b.disabled = false; }
   });
-  addEventListener('resize', () => { clearTimeout(window._rz); window._rz = setTimeout(() => showTab(activeTab), 220); });
   load().catch(e => { $('#loading').textContent = 'Failed to load: ' + e.message; });
 }
-
 init();

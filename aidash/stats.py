@@ -1,43 +1,6 @@
 """All dashboard aggregations. Every function returns plain JSON-able data."""
-from . import config
-
-
-def _rows(con, sql, params=()):
-    return [dict(r) for r in con.execute(sql, params)]
-
-
-def _one(con, sql, params=()):
-    r = con.execute(sql, params).fetchone()
-    return dict(r) if r else {}
-
-
-def _scalar(con, sql, params=(), default=0):
-    r = con.execute(sql, params).fetchone()
-    if not r or r[0] is None:
-        return default
-    return r[0]
-
-
-# A "user" record in a transcript is not necessarily something a person typed.
-# It also carries SDK-injected prompts, task notifications and the instructions
-# handed to sub-agents. Only these sources originate with the human.
-HUMAN_PROMPT = "source IN ('typed','queued','suggestion_accepted')"
-
-
-def _where(filters, prefix=""):
-    """Build a WHERE fragment from {since, until, project} filters."""
-    clauses, params = [], []
-    p = prefix
-    if filters.get("since"):
-        clauses.append(f"{p}date >= ?")
-        params.append(filters["since"])
-    if filters.get("until"):
-        clauses.append(f"{p}date <= ?")
-        params.append(filters["until"])
-    if filters.get("project"):
-        clauses.append(f"{p}project = ?")
-        params.append(filters["project"])
-    return (" AND " + " AND ".join(clauses) if clauses else ""), params
+from . import config, insights
+from .sql import HUMAN_PROMPT, SESSION_TITLE, one as _one, rows as _rows, scalar as _scalar, where as _where
 
 
 # --------------------------------------------------------------------------
@@ -327,7 +290,7 @@ def cc_sessions(con, f, limit=60):
     w, p = _where(f, "m.")
     return _rows(con, f"""
         SELECT m.session_id, m.project,
-               COALESCE(s.ai_title, s.slug, m.session_id) AS title,
+               {SESSION_TITLE.format(fallback="m.session_id")} AS title,
                s.git_branch, s.version, s.cwd,
                MIN(m.ts) AS started, MAX(m.ts) AS ended,
                SUM(CASE WHEN m.usage_dupe=0 THEN 1 ELSE 0 END) AS messages,
@@ -352,11 +315,13 @@ def cc_session_shape(con, f):
 
 def cc_prompts(con, f):
     w, p = _where(f)
+    # One source can carry both kinds (an unlabelled turn in an older build
+    # may or may not be typed), so the split is part of the grouping.
     by_source = _rows(con, f"""
-        SELECT COALESCE(source,'(sub-agent / legacy)') AS source, COUNT(*) AS n,
+        SELECT COALESCE(source,'(unlabelled)') AS source, COUNT(*) AS n,
                ROUND(AVG(chars),0) AS avg_chars,
                CASE WHEN {HUMAN_PROMPT} THEN 'you' ELSE 'automated' END AS who
-        FROM cc_prompt WHERE 1=1 {w} GROUP BY source ORDER BY n DESC""", p)
+        FROM cc_prompt WHERE 1=1 {w} GROUP BY source, is_human ORDER BY n DESC""", p)
     by_origin = _rows(con, f"""
         SELECT COALESCE(origin_kind,'(none)') AS origin, COUNT(*) AS n
         FROM cc_prompt WHERE 1=1 {w} GROUP BY origin_kind ORDER BY n DESC""", p)
@@ -607,9 +572,11 @@ def project_list(con):
         con, "SELECT DISTINCT project FROM cc_message WHERE project IS NOT NULL ORDER BY project")]
 
 
-def build_payload(con, filters):
+def build_payload(con, filters, with_insights=False):
+    """Everything the tabs need. The behaviour tabs' data is heavier and is
+    fetched on demand (/api/insights) unless a caller wants it inline."""
     f = filters or {}
-    return {
+    payload = {
         "meta": meta(con),
         "filters": f,
         "projects": project_list(con),
@@ -643,3 +610,6 @@ def build_payload(con, filters):
             "ai_lines": cur_ai_lines(con, f),
         },
     }
+    if with_insights:
+        payload["insights"] = insights.build(con, f)
+    return payload

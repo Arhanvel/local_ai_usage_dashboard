@@ -16,3 +16,6 @@ env/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local dev-server launch config for the Claude desktop app
+.claude/

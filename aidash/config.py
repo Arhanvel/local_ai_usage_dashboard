@@ -1,11 +1,14 @@
 """Path discovery and shared configuration."""
 import json
 import os
+import re
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "data"
+# AIDASH_DATA_DIR relocates everything generated (DB, reports, proposals).
+DATA_DIR = Path(os.environ.get("AIDASH_DATA_DIR") or ROOT / "data")
 WEB_DIR = ROOT / "web"
 DB_PATH = DATA_DIR / "usage.db"
 PRICING_PATH = Path(__file__).resolve().parent / "pricing.json"
@@ -37,9 +40,24 @@ def cursor_global_storage() -> Path | None:
     return None
 
 
+@lru_cache(maxsize=1)
 def load_pricing() -> dict:
+    """pricing.json, parsed once per process (edit it, restart, re-ingest)."""
     with open(PRICING_PATH, "r", encoding="utf-8") as fh:
         return json.load(fh)
+
+
+_SLUG = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def slug(text: str, limit: int = 80) -> str:
+    """Filename-safe form of a label (project name, title)."""
+    return _SLUG.sub("-", text or "").strip("-")[:limit]
+
+
+def stamp() -> str:
+    """Timestamp used in generated filenames."""
+    return datetime.now().strftime("%Y-%m-%d_%H%M")
 
 
 def parse_ts(value):

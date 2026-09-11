@@ -4,7 +4,7 @@ import sqlite3
 from . import config
 
 # Bump when the schema changes; init() then rebuilds the DB from source files.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 9
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS cc_session (
     cwd          TEXT,
     slug         TEXT,
     ai_title     TEXT,
+    custom_title TEXT,
+    agent_name   TEXT,
     git_branch   TEXT,
     version      TEXT,
     entrypoint   TEXT,
@@ -81,6 +83,9 @@ CREATE TABLE IF NOT EXISTS cc_message (
     web_fetch_reqs  INTEGER DEFAULT 0,
     is_api_error    INTEGER DEFAULT 0,
     api_error_status TEXT,
+    -- usage_limit | rate_limit | billing | api_error | fallback, from the
+    -- reply text; NULL for a normal reply
+    error_kind      TEXT,
     -- One API response is written to the transcript as several lines (thinking,
     -- text, one per tool_use) and EVERY line repeats the same usage block.
     -- Only one row per request_id keeps the tokens; the rest are zeroed and
@@ -156,10 +161,66 @@ CREATE TABLE IF NOT EXISTS cc_prompt (
     origin_kind TEXT,
     chars       INTEGER DEFAULT 0,
     words       INTEGER DEFAULT 0,
-    preview     TEXT
+    preview     TEXT,
+    text        TEXT,      -- first 6000 chars, system-reminder blocks stripped
+    is_slash    INTEGER DEFAULT 0,
+    slash_name  TEXT,
+    intents     TEXT,      -- comma-joined intent buckets (see patterns.INTENTS)
+    is_human    INTEGER DEFAULT 0,
+    transcript  TEXT DEFAULT 'main'   -- main | subagent | workflow
 );
 CREATE INDEX IF NOT EXISTS ix_prompt_date    ON cc_prompt(date);
 CREATE INDEX IF NOT EXISTS ix_prompt_session ON cc_prompt(session_id);
+CREATE INDEX IF NOT EXISTS ix_prompt_human   ON cc_prompt(is_human);
+
+-- Git outcomes recovered from recorded shell output. `[branch sha] subject`
+-- is printed by `git commit` and nothing else, so a match proves a commit.
+CREATE TABLE IF NOT EXISTS cc_git (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL,   -- commit | push | pr
+    key         TEXT NOT NULL,   -- sha | remote | pr url
+    session_id  TEXT,
+    project     TEXT,
+    ts          TEXT,
+    date        TEXT,
+    branch      TEXT,
+    subject     TEXT,
+    files       INTEGER DEFAULT 0,
+    insertions  INTEGER DEFAULT 0,
+    deletions   INTEGER DEFAULT 0,
+    UNIQUE (kind, key)
+);
+CREATE INDEX IF NOT EXISTS ix_git_date ON cc_git(date);
+
+-- Issue keys (ABC-123) with where each was seen. Evidence strength differs:
+-- a key in a commit subject proves delivery, a key in a prompt only means it
+-- was discussed. See insights.cc_tickets().
+CREATE TABLE IF NOT EXISTS cc_ticket (
+    key         TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
+    project     TEXT,
+    date        TEXT,
+    -- commit | branch | title | prompt | file | lookup
+    evidence    TEXT NOT NULL,
+    n           INTEGER DEFAULT 0,
+    PRIMARY KEY (key, session_id, evidence)
+);
+
+-- ~/.claude/history.jsonl: every prompt line ever typed at the REPL. It
+-- outlives transcript retention, so it is the long-horizon record.
+CREATE TABLE IF NOT EXISTS cc_history (
+    key         TEXT PRIMARY KEY,      -- sha1(timestamp|session|text): the file may be trimmed
+    ts          TEXT,
+    date        TEXT,
+    project_path TEXT,
+    project     TEXT,
+    session_id  TEXT,
+    chars       INTEGER DEFAULT 0,
+    pasted      INTEGER DEFAULT 0,
+    is_slash    INTEGER DEFAULT 0,
+    preview     TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_hist_date ON cc_history(date);
 
 CREATE TABLE IF NOT EXISTS cc_turn (
     uuid          TEXT PRIMARY KEY,

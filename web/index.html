@@ -43,28 +43,20 @@
             <span>Project</span>
             <select id="project"><option value="">All</option></select>
           </label>
-          <button id="refresh" class="primary">Refresh</button>
+          <button id="refresh" class="primary" type="button" title="Pull new transcripts (incremental)">Refresh data</button>
         </div>
       </header>
+      <div id="jobbar" class="jobbar" role="status" hidden></div>
 
       <main>
         <div id="loading"><span class="pulse"></span> reading local transcripts…</div>
-        <div id="app" hidden>
-          <section class="tab" data-tab="overview"></section>
-          <section class="tab" data-tab="activity"></section>
-          <section class="tab" data-tab="cost"></section>
-          <section class="tab" data-tab="projects"></section>
-          <section class="tab" data-tab="tools"></section>
-          <section class="tab" data-tab="code"></section>
-          <section class="tab" data-tab="sessions"></section>
-          <section class="tab" data-tab="cursor"></section>
-          <section class="tab" data-tab="data"></section>
-        </div>
+        <div id="app" hidden></div>
       </main>
     </div>
   </div>
 
   <div class="tip" id="tip" role="status"></div>
+  <script src="insights.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

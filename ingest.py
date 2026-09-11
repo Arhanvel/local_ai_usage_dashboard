@@ -43,7 +43,7 @@ def main() -> int:
         res = claude_ingest.run(con, full=args.full, verbose=verbose)
         if res.get("ok"):
             print(f"  {res['files_read']}/{res['files_seen']} transcripts read, "
-                  f"{res['rows']} rows in {time.time() - t0:.1f}s")
+                  f"{res['rows']} rows, {res['history_lines']} history lines in {time.time() - t0:.1f}s")
             guessed = {m: c for m, c in res.get("pricing_confidence", {}).items() if c != "official"}
             if guessed:
                 print(f"  ! cost is estimated for: {', '.join(sorted(guessed))}"
